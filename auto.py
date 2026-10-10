@@ -1,85 +1,104 @@
 import os
+import time
+import secrets
 import requests
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 
-# Carrega as variáveis de ambiente do arquivo .env
-load_dotenv()
+ENV = ".env"
+if not os.path.exists(ENV):
+    open(ENV, "w").close()
+load_dotenv(ENV)
 
 BASE = "https://api.wagnerloch.com.br"
+MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", "10"))
+
 
 def mascarar(texto):
-    """Mascara o token para exibir apenas as pontas no terminal."""
     if texto and len(texto) > 10:
         return f"{texto[:5]}...{texto[-5:]}"
     return "***"
 
-# -------------------------------------------------------------------
-# PASSO 1: Criar a conta (POST /auth/register)
-# -------------------------------------------------------------------
-print("--- Passo 1: Registrando usuário ---")
-dados_registro = {
-    "email": os.getenv("API_EMAIL"),
-    "name": "Samuel Silva da Costa Vargas",  # Seu nome cadastrado
-    "password": os.getenv("API_SENHA")
-}
 
-resposta_registro = requests.post(
-    f"{BASE}/auth/register", 
-    json=dados_registro, 
-    timeout=10
-)
+def credenciais():
+    """Usa API_EMAIL e API_SENHA do .env; se faltarem, cria e salva."""
+    email = os.getenv("API_EMAIL")
+    senha = os.getenv("API_SENHA")
+    if not email or not senha:
+        email = f"user{secrets.token_hex(4)}@teste.com"
+        senha = secrets.token_urlsafe(12)
+        set_key(ENV, "API_EMAIL", email)
+        set_key(ENV, "API_SENHA", senha)
+        print("Perfil novo gerado e salvo no .env")
+    return email, senha
 
-# Se já estiver cadastrado (ex: erro 400 ou 409), o código avisa e segue para o login
-if resposta_registro.status_code in [200, 201]:
-    print("Conta criada com sucesso!")
-    print("Resposta do registro:", resposta_registro.json())
-else:
-    print(f"Registro não efetuado (Status: {resposta_registro.status_code}). Continuando para o login...")
 
-print("\n" + "="*50 + "\n")
+def cadastrar(email, senha):
+    print("--- Registrando usuário ---")
+    r = requests.post(
+        f"{BASE}/auth/register",
+        json={"email": email, "name": "Samuel Silva da Costa Vargas", "password": senha},
+        timeout=10,
+    )
+    if r.status_code in (200, 201):
+        print("Conta criada com sucesso!")
+    else:
+        print(f"Registro não efetuado (Status: {r.status_code}). Seguindo para o login...")
 
-# -------------------------------------------------------------------
-# PASSO 2: Fazer Login e obter o token (POST /auth/login)
-# -------------------------------------------------------------------
-print("--- Passo 2: Efetuando Login ---")
-credenciais = {
-    "email": os.getenv("API_EMAIL"),
-    "password": os.getenv("API_SENHA")
-}
 
-resposta_login = requests.post(
-    f"{BASE}/auth/login", 
-    json=credenciais, 
-    timeout=10
-)
-resposta_login.raise_for_status()
+def logar(email, senha):
+    print("--- Efetuando login ---")
+    r = requests.post(
+        f"{BASE}/auth/login",
+        json={"email": email, "password": senha},
+        timeout=10,
+    )
+    r.raise_for_status()
+    dados = r.json()
+    token = dados.get("token") or dados.get("access_token")
+    if not token:
+        raise SystemExit(f"Login não devolveu token: {dados}")
+    print(f"Token obtido: {mascarar(token)}")
+    return token
 
-dados_login = resposta_login.json()
 
-# Captura o token do JSON retornado
-token = dados_login.get("token") or dados_login.get("access_token")
+def esperar_ate(alvo):
+    """Dorme até o horário-alvo (time.monotonic), com precisão no final."""
+    while True:
+        falta = alvo - time.monotonic()
+        if falta <= 0:
+            return
+        if falta > 0.05:
+            time.sleep(falta - 0.05)
 
-print("Login efetuado com sucesso!")
-print(f"Token obtido: {mascarar(token)}")
 
-print("\n" + "="*50 + "\n")
+# --- Autenticação ---
+email, senha = credenciais()
+cadastrar(email, senha)
+token = logar(email, senha)
 
-# -------------------------------------------------------------------
-# PASSO 3: Acessar a rota protegida do perfil (GET /auth/profile)
-# -------------------------------------------------------------------
-print("--- Passo 3: Buscando Perfil Autorizado ---")
-headers = {
-    "Authorization": f"Bearer {token}"
-}
+# --- Desafio ---
+print("\n--- Iniciando o desafio ---")
+URL_DESAFIO = f"{BASE}/challenges/loop"
+headers = {"Authorization": f"Bearer {token}"}
+body = {"maxIterations": MAX_ITERATIONS}
 
-resposta_perfil = requests.get(
-    f"{BASE}/auth/profile", 
-    headers=headers, 
-    timeout=10
-)
-resposta_perfil.raise_for_status()
+while True:
+    envio = time.monotonic()
+    try:
+        resposta = requests.post(URL_DESAFIO, json=body, headers=headers, timeout=10)
+        dados = resposta.json()
+    except requests.RequestException as e:
+        print(f"Erro de conexão: {e}")
+        break
 
-perfil = resposta_perfil.json()
+    if resposta.status_code != 200:
+        print(resposta.status_code, dados)
+        break
 
-print("Perfil retornado pela API:")
-print(perfil)
+    status = dados.get("status")
+    print(f"[{status}] {dados.get('message')} {dados.get('progress', '')}")
+
+    if status not in ("START", "CONTINUE"):
+        break
+
+    esperar_ate(envio + dados["nextWaitTimeInSeconds"])
